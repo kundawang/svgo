@@ -222,7 +222,16 @@ is used to specify inputs and results for filter effects
 
 	New(w io.Writer) *SVG
   Constructor, Specify the output destination.
-  
+
+	NewAutoViewBox(w io.Writer, margin float64) *SVG
+  Constructor for automatic viewBox mode: the document is buffered and End
+  emits a viewBox computed from the visible bounding boxes of all drawn
+  elements (paths, basic shapes and text), expanded by margin user units on
+  every side. Nested group transforms and stroke widths are accounted for.
+  Text bounds are estimated from the font size unless the MeasureText hook
+  is set; bounds errors (for example non-finite transforms) are reported by
+  the Err method, and the accumulated bounds are available via Bounds.
+
 	Start(w int, h int, attributes ...string)
   begin the SVG document with the width w and height h. Optionally add additional elements
   (such as additional namespaces or scripting events)

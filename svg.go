@@ -34,6 +34,15 @@ import (
 // SVG defines the location of the generated SVG
 type SVG struct {
 	Writer io.Writer
+
+	// MeasureText, when set in automatic viewBox mode (see NewAutoViewBox),
+	// supplies text metrics: it returns the width, ascent and descent of
+	// string s rendered at the given font size. When nil, text bounds are
+	// estimated from the font size.
+	MeasureText func(s string, fontSize float64) (width, ascent, descent float64)
+
+	// auto is non-nil in automatic viewBox mode (see bbox.go)
+	auto *autoState
 }
 
 // Offcolor defines the offset and color for gradients
@@ -62,18 +71,18 @@ const (
 )
 
 // New is the SVG constructor, specifying the io.Writer where the generated SVG is written.
-func New(w io.Writer) *SVG { return &SVG{w} }
+func New(w io.Writer) *SVG { return &SVG{Writer: w} }
 
 func (svg *SVG) print(a ...interface{}) (n int, errno error) {
-	return fmt.Fprint(svg.Writer, a...)
+	return fmt.Fprint(svg.out(), a...)
 }
 
 func (svg *SVG) println(a ...interface{}) (n int, errno error) {
-	return fmt.Fprintln(svg.Writer, a...)
+	return fmt.Fprintln(svg.out(), a...)
 }
 
 func (svg *SVG) printf(format string, a ...interface{}) (n int, errno error) {
-	return fmt.Fprintf(svg.Writer, format, a...)
+	return fmt.Fprintf(svg.out(), format, a...)
 }
 
 func (svg *SVG) genattr(ns []string) {
@@ -89,6 +98,10 @@ func (svg *SVG) genattr(ns []string) {
 // Other attributes may be optionally added, for example viewbox or additional namespaces
 // Standard Reference: http://www.w3.org/TR/SVG11/struct.html#SVGElement
 func (svg *SVG) Start(w int, h int, ns ...string) {
+	if svg.auto != nil {
+		svg.saveStart(w, h, "", false, ns)
+		return
+	}
 	svg.printf(svginitfmt, svgtop, w, "", h, "")
 	svg.genattr(ns)
 }
@@ -96,6 +109,10 @@ func (svg *SVG) Start(w int, h int, ns ...string) {
 // Startunit begins the SVG document, with width and height in the specified units
 // Other attributes may be optionally added, for example viewbox or additional namespaces
 func (svg *SVG) Startunit(w int, h int, unit string, ns ...string) {
+	if svg.auto != nil {
+		svg.saveStart(w, h, unit, false, ns)
+		return
+	}
 	svg.printf(svginitfmt, svgtop, w, unit, h, unit)
 	svg.genattr(ns)
 }
@@ -103,6 +120,10 @@ func (svg *SVG) Startunit(w int, h int, unit string, ns ...string) {
 // Startpercent begins the SVG document, with width and height as percentages
 // Other attributes may be optionally added, for example viewbox or additional namespaces
 func (svg *SVG) Startpercent(w int, h int, ns ...string) {
+	if svg.auto != nil {
+		svg.saveStart(w, h, "%", false, ns)
+		return
+	}
 	svg.printf(svginitfmt, svgtop, w, "%", h, "%")
 	svg.genattr(ns)
 }
@@ -120,12 +141,24 @@ func (svg *SVG) StartviewUnit(w, h int, unit string, minx, miny, vw, vh int) {
 
 // Startraw begins the SVG document, passing arbitrary attributes
 func (svg *SVG) Startraw(ns ...string) {
+	if svg.auto != nil {
+		svg.saveStart(0, 0, "", true, ns)
+		return
+	}
 	svg.printf(svgtop)
 	svg.genattr(ns)
 }
 
-// End the SVG document
-func (svg *SVG) End() { svg.println("</svg>") }
+// End the SVG document. In automatic viewBox mode (see NewAutoViewBox) the
+// buffered document is written here, with a viewBox attribute computed from
+// the bounds of all visible elements.
+func (svg *SVG) End() {
+	if svg.auto != nil {
+		svg.endAuto()
+		return
+	}
+	svg.println("</svg>")
+}
 
 // linkembed defines an element with a specified type,
 // (for example "application/javascript", or "text/css").
@@ -162,11 +195,17 @@ func (svg *SVG) Style(scriptype string, data ...string) {
 
 // Gstyle begins a group, with the specified style.
 // Standard Reference: http://www.w3.org/TR/SVG11/struct.html#GElement
-func (svg *SVG) Gstyle(s string) { svg.println(group("style", s)) }
+func (svg *SVG) Gstyle(s string) {
+	svg.bpush("", []string{s})
+	svg.println(group("style", s))
+}
 
 // Gtransform begins a group, with the specified transform
 // Standard Reference: http://www.w3.org/TR/SVG11/coords.html#TransformAttribute
-func (svg *SVG) Gtransform(s string) { svg.println(group("transform", s)) }
+func (svg *SVG) Gtransform(s string) {
+	svg.bpush(s, nil)
+	svg.println(group("transform", s))
+}
 
 // Translate begins coordinate translation, end with Gend()
 // Standard Reference: http://www.w3.org/TR/SVG11/coords.html#TransformAttribute
@@ -207,48 +246,72 @@ func (svg *SVG) RotateTranslate(x, y int, r float64) {
 }
 
 // Group begins a group with arbitrary attributes
-func (svg *SVG) Group(s ...string) { svg.printf("<g %s\n", endstyle(s, `>`)) }
+func (svg *SVG) Group(s ...string) {
+	if svg.auto != nil {
+		svg.bpush(parseAttrs(s)["transform"], s)
+	}
+	svg.printf("<g %s\n", endstyle(s, `>`))
+}
 
 // Gid begins a group, with the specified id
 func (svg *SVG) Gid(s string) {
+	svg.bpush("", nil)
 	svg.print(`<g id="`)
-	xml.Escape(svg.Writer, []byte(s))
+	xml.Escape(svg.out(), []byte(s))
 	svg.println(`">`)
 }
 
 // Gend ends a group (must be paired with Gsttyle, Gtransform, Gid).
-func (svg *SVG) Gend() { svg.println(`</g>`) }
+func (svg *SVG) Gend() {
+	svg.bpop()
+	svg.println(`</g>`)
+}
 
 // ClipPath defines a clip path
-func (svg *SVG) ClipPath(s ...string) { svg.printf(`<clipPath %s`, endstyle(s, `>`)) }
+func (svg *SVG) ClipPath(s ...string) {
+	svg.enterHidden()
+	svg.printf(`<clipPath %s`, endstyle(s, `>`))
+}
 
 // ClipEnd ends a ClipPath
 func (svg *SVG) ClipEnd() {
+	svg.leaveHidden()
 	svg.println(`</clipPath>`)
 }
 
 // Def begins a defintion block.
 // Standard Reference: http://www.w3.org/TR/SVG11/struct.html#DefsElement
-func (svg *SVG) Def() { svg.println(`<defs>`) }
+func (svg *SVG) Def() {
+	svg.enterHidden()
+	svg.println(`<defs>`)
+}
 
 // DefEnd ends a defintion block.
-func (svg *SVG) DefEnd() { svg.println(`</defs>`) }
+func (svg *SVG) DefEnd() {
+	svg.leaveHidden()
+	svg.println(`</defs>`)
+}
 
 // Marker defines a marker
 // Standard reference: http://www.w3.org/TR/SVG11/painting.html#MarkerElement
 func (svg *SVG) Marker(id string, x, y, width, height int, s ...string) {
+	svg.enterHidden()
 	svg.printf(`<marker id="%s" refX="%d" refY="%d" markerWidth="%d" markerHeight="%d" %s`,
 		id, x, y, width, height, endstyle(s, ">\n"))
 }
 
 // MarkerEnd ends a marker
-func (svg *SVG) MarkerEnd() { svg.println(`</marker>`) }
+func (svg *SVG) MarkerEnd() {
+	svg.leaveHidden()
+	svg.println(`</marker>`)
+}
 
 // Pattern defines a pattern with the specified dimensions.
 // The putype can be either "user" or "obj", which sets the patternUnits
 // attribute to be either userSpaceOnUse or objectBoundingBox
 // Standard reference: http://www.w3.org/TR/SVG11/pservers.html#Patterns
 func (svg *SVG) Pattern(id string, x, y, width, height int, putype string, s ...string) {
+	svg.enterHidden()
 	puattr := "userSpaceOnUse"
 	if putype != "user" {
 		puattr = "objectBoundingBox"
@@ -258,7 +321,10 @@ func (svg *SVG) Pattern(id string, x, y, width, height int, putype string, s ...
 }
 
 // PatternEnd ends a marker
-func (svg *SVG) PatternEnd() { svg.println(`</pattern>`) }
+func (svg *SVG) PatternEnd() {
+	svg.leaveHidden()
+	svg.println(`</pattern>`)
+}
 
 // Desc specified the text of the description tag.
 // Standard Reference: http://www.w3.org/TR/SVG11/struct.html#DescElement
@@ -271,13 +337,17 @@ func (svg *SVG) Title(s string) { svg.tt("title", s) }
 // Link begins a link named "name", with the specified title.
 // Standard Reference: http://www.w3.org/TR/SVG11/linking.html#Links
 func (svg *SVG) Link(href string, title string) {
+	svg.bpush("", nil)
 	svg.printf("<a xlink:href=\"%s\" xlink:title=\"", href)
-	xml.Escape(svg.Writer, []byte(title))
+	xml.Escape(svg.out(), []byte(title))
 	svg.println("\">")
 }
 
 // LinkEnd ends a link.
-func (svg *SVG) LinkEnd() { svg.println(`</a>`) }
+func (svg *SVG) LinkEnd() {
+	svg.bpop()
+	svg.println(`</a>`)
+}
 
 // Use places the object referenced at link at the location x, y, with optional style.
 // Standard Reference: http://www.w3.org/TR/SVG11/struct.html#UseElement
@@ -287,23 +357,29 @@ func (svg *SVG) Use(x int, y int, link string, s ...string) {
 
 // Mask creates a mask with a specified id, dimension, and optional style.
 func (svg *SVG) Mask(id string, x int, y int, w int, h int, s ...string) {
+	svg.enterHidden()
 	svg.printf(`<mask id="%s" x="%d" y="%d" width="%d" height="%d" %s`, id, x, y, w, h, endstyle(s, `>`))
 }
 
 // MaskEnd ends a Mask.
-func (svg *SVG) MaskEnd() { svg.println(`</mask>`) }
+func (svg *SVG) MaskEnd() {
+	svg.leaveHidden()
+	svg.println(`</mask>`)
+}
 
 // Shapes
 
 // Circle centered at x,y, with radius r, with optional style.
 // Standard Reference: http://www.w3.org/TR/SVG11/shapes.html#CircleElement
 func (svg *SVG) Circle(x int, y int, r int, s ...string) {
+	svg.accBox(float64(x-r), float64(y-r), float64(x+r), float64(y+r), s)
 	svg.printf(`<circle cx="%d" cy="%d" r="%d" %s`, x, y, r, endstyle(s, emptyclose))
 }
 
 // Ellipse centered at x,y, centered at x,y with radii w, and h, with optional style.
 // Standard Reference: http://www.w3.org/TR/SVG11/shapes.html#EllipseElement
 func (svg *SVG) Ellipse(x int, y int, w int, h int, s ...string) {
+	svg.accBox(float64(x-w), float64(y-h), float64(x+w), float64(y+h), s)
 	svg.printf(`<ellipse cx="%d" cy="%d" rx="%d" ry="%d" %s`,
 		x, y, w, h, endstyle(s, emptyclose))
 }
@@ -317,6 +393,7 @@ func (svg *SVG) Polygon(x []int, y []int, s ...string) {
 // Rect draws a rectangle with upper left-hand corner at x,y, with width w, and height h, with optional style
 // Standard Reference: http://www.w3.org/TR/SVG11/shapes.html#RectElement
 func (svg *SVG) Rect(x int, y int, w int, h int, s ...string) {
+	svg.accBox(float64(x), float64(y), float64(x+w), float64(y+h), s)
 	svg.printf(`<rect %s %s`, dim(x, y, w, h), endstyle(s, emptyclose))
 }
 
@@ -331,6 +408,7 @@ func (svg *SVG) CenterRect(x int, y int, w int, h int, s ...string) {
 // Style is optional.
 // Standard Reference: http://www.w3.org/TR/SVG11/shapes.html#RectElement
 func (svg *SVG) Roundrect(x int, y int, w int, h int, rx int, ry int, s ...string) {
+	svg.accBox(float64(x), float64(y), float64(x+w), float64(y+h), s)
 	svg.printf(`<rect %s rx="%d" ry="%d" %s`, dim(x, y, w, h), rx, ry, endstyle(s, emptyclose))
 }
 
@@ -343,6 +421,7 @@ func (svg *SVG) Square(x int, y int, l int, s ...string) {
 
 // Path draws an arbitrary path, the caller is responsible for structuring the path data
 func (svg *SVG) Path(d string, s ...string) {
+	svg.accPath(d, s)
 	svg.printf(`<path d="%s" %s`, d, endstyle(s, emptyclose))
 }
 
@@ -354,6 +433,10 @@ func (svg *SVG) Path(d string, s ...string) {
 // otherwise the arc sweep is less than 180 degrees
 // http://www.w3.org/TR/SVG11/paths.html#PathDataEllipticalArcCommands
 func (svg *SVG) Arc(sx int, sy int, ax int, ay int, r int, large bool, sweep bool, ex int, ey int, s ...string) {
+	if svg.auto != nil {
+		svg.accBBox(arcBBox(float64(sx), float64(sy), float64(ax), float64(ay), float64(r),
+			large, sweep, float64(ex), float64(ey)), s)
+	}
 	svg.printf(`%s A%s %d %s %s %s" %s`,
 		ptag(sx, sy), coord(ax, ay), r, onezero(large), onezero(sweep), coord(ex, ey), endstyle(s, emptyclose))
 }
@@ -362,6 +445,10 @@ func (svg *SVG) Arc(sx int, sy int, ax int, ay int, r int, large bool, sweep boo
 // with control points at cx,cy and px,py.
 // Standard Reference: http://www.w3.org/TR/SVG11/paths.html#PathDataCubicBezierCommands
 func (svg *SVG) Bezier(sx int, sy int, cx int, cy int, px int, py int, ex int, ey int, s ...string) {
+	if svg.auto != nil {
+		svg.accBBox(cubicBBox(float64(sx), float64(sy), float64(cx), float64(cy),
+			float64(px), float64(py), float64(ex), float64(ey)), s)
+	}
 	svg.printf(`%s C%s %s %s" %s`,
 		ptag(sx, sy), coord(cx, cy), coord(px, py), coord(ex, ey), endstyle(s, emptyclose))
 }
@@ -370,6 +457,10 @@ func (svg *SVG) Bezier(sx int, sy int, cx int, cy int, px int, py int, ex int, e
 // beginning at sx,sy, ending at ex, sy with control points at cx, cy
 // Standard Reference: http://www.w3.org/TR/SVG11/paths.html#PathDataQuadraticBezierCommands
 func (svg *SVG) Qbez(sx int, sy int, cx int, cy int, ex int, ey int, s ...string) {
+	if svg.auto != nil {
+		svg.accBBox(quadBBox(float64(sx), float64(sy), float64(cx), float64(cy),
+			float64(ex), float64(ey)), s)
+	}
 	svg.printf(`%s Q%s %s" %s`,
 		ptag(sx, sy), coord(cx, cy), coord(ex, ey), endstyle(s, emptyclose))
 }
@@ -378,6 +469,14 @@ func (svg *SVG) Qbez(sx int, sy int, cx int, cy int, ex int, ey int, s ...string
 // with control points are at cx,cy, ex,ey.
 // Standard Reference: http://www.w3.org/TR/SVG11/paths.html#PathDataQuadraticBezierCommands
 func (svg *SVG) Qbezier(sx int, sy int, cx int, cy int, ex int, ey int, tx int, ty int, s ...string) {
+	if svg.auto != nil {
+		var b bbox
+		b.add(quadBBox(float64(sx), float64(sy), float64(cx), float64(cy), float64(ex), float64(ey)))
+		// the T segment's control point is the reflection of the previous one
+		b.add(quadBBox(float64(ex), float64(ey), 2*float64(ex)-float64(cx), 2*float64(ey)-float64(cy),
+			float64(tx), float64(ty)))
+		svg.accBBox(b, s)
+	}
 	svg.printf(`%s Q%s %s T%s" %s`,
 		ptag(sx, sy), coord(cx, cy), coord(ex, ey), coord(tx, ty), endstyle(s, emptyclose))
 }
@@ -387,6 +486,7 @@ func (svg *SVG) Qbezier(sx int, sy int, cx int, cy int, ex int, ey int, tx int, 
 // Line draws a straight line between two points, with optional style.
 // Standard Reference: http://www.w3.org/TR/SVG11/shapes.html#LineElement
 func (svg *SVG) Line(x1 int, y1 int, x2 int, y2 int, s ...string) {
+	svg.accPoints([]int{x1, x2}, []int{y1, y2}, s)
 	svg.printf(`<line x1="%d" y1="%d" x2="%d" y2="%d" %s`, x1, y1, x2, y2, endstyle(s, emptyclose))
 }
 
@@ -400,33 +500,36 @@ func (svg *SVG) Polyline(x []int, y []int, s ...string) {
 // width w, and height h, referenced at link, with optional style.
 // Standard Reference: http://www.w3.org/TR/SVG11/struct.html#ImageElement
 func (svg *SVG) Image(x int, y int, w int, h int, link string, s ...string) {
+	svg.accBox(float64(x), float64(y), float64(x+w), float64(y+h), s)
 	svg.printf(`<image %s %s %s`, dim(x, y, w, h), href(link), endstyle(s, emptyclose))
 }
 
 // Text places the specified text, t at x,y according to the style specified in s
 // Standard Reference: http://www.w3.org/TR/SVG11/text.html#TextElement
 func (svg *SVG) Text(x int, y int, t string, s ...string) {
+	svg.accText(x, y, t, s)
 	svg.printf(`<text %s %s`, loc(x, y), endstyle(s, ">"))
-	xml.Escape(svg.Writer, []byte(t))
+	xml.Escape(svg.out(), []byte(t))
 	svg.println(`</text>`)
 }
 
 // Textspan begins text, assuming a tspan will be included, end with TextEnd()
 // Standard Reference: https://www.w3.org/TR/SVG11/text.html#TSpanElement
 func (svg *SVG) Textspan(x int, y int, t string, s ...string) {
+	svg.accText(x, y, t, s)
 	svg.printf(`<text %s %s`, loc(x, y), endstyle(s, ">"))
-	xml.Escape(svg.Writer, []byte(t))
+	xml.Escape(svg.out(), []byte(t))
 }
 
 // Span makes styled spanned text, should be proceeded by Textspan
 // Standard Reference: https://www.w3.org/TR/SVG11/text.html#TSpanElement
 func (svg *SVG) Span(t string, s ...string) {
 	if len(s) == 0 {
-		xml.Escape(svg.Writer, []byte(t))
+		xml.Escape(svg.out(), []byte(t))
 		return
 	}
 	svg.printf(`<tspan %s`, endstyle(s, ">"))
-	xml.Escape(svg.Writer, []byte(t))
+	xml.Escape(svg.out(), []byte(t))
 	svg.printf(`</tspan>`)
 }
 
@@ -440,7 +543,7 @@ func (svg *SVG) TextEnd() {
 // Standard Reference: http://www.w3.org/TR/SVG11/text.html#TextPathElement
 func (svg *SVG) Textpath(t string, pathid string, s ...string) {
 	svg.printf("<text %s<textPath xlink:href=\"%s\">", endstyle(s, ">"), pathid)
-	xml.Escape(svg.Writer, []byte(t))
+	xml.Escape(svg.out(), []byte(t))
 	svg.println(`</textPath></text>`)
 }
 
@@ -508,12 +611,14 @@ func (svg *SVG) stopcolor(oc []Offcolor) {
 // Filter begins a filter set
 // Standard reference: http://www.w3.org/TR/SVG11/filters.html#FilterElement
 func (svg *SVG) Filter(id string, s ...string) {
+	svg.enterHidden()
 	svg.printf(`<filter id="%s" %s`, id, endstyle(s, ">\n"))
 }
 
 // Fend ends a filter set
 // Standard reference: http://www.w3.org/TR/SVG11/filters.html#FilterElement
 func (svg *SVG) Fend() {
+	svg.leaveHidden()
 	svg.println(`</filter>`)
 }
 
@@ -970,12 +1075,13 @@ func endstyle(s []string, endtag string) string {
 // tt creates a xml element, tag containing s
 func (svg *SVG) tt(tag string, s string) {
 	svg.print("<" + tag + ">")
-	xml.Escape(svg.Writer, []byte(s))
+	xml.Escape(svg.out(), []byte(s))
 	svg.println("</" + tag + ">")
 }
 
 // poly compiles the polygon element
 func (svg *SVG) poly(x []int, y []int, tag string, s ...string) {
+	svg.accPoints(x, y, s)
 	svg.pp(x, y, "<"+tag+" points=\"")
 	svg.print(`" ` + endstyle(s, "/>\n"))
 }
