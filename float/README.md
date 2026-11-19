@@ -36,6 +36,23 @@ Output goes to the specified io.Writer, operation occur with Go's float64 type.
 
  desc, defs, g (style, transform, id), marker, mask, pattern, title, (a)ddress, link, script, use
 
+### Reusable style classes ###
+
+ StyleClass(style string) (string, error)
+  register name:value declarations once and return a stable class name; the same
+  normalized style returns the same name and writes one CSS rule.
+ StyleClassAs(name, style string) (string, error)
+  register under an explicit class name (name conflict: ErrClassNameConflict)
+ FillClass(color string), StrokeClass(color string)
+ StrokeWidthClass(width float64)
+ OpacityClass(opacity float64), FillOpacityClass(opacity float64), StrokeOpacityClass(opacity float64)
+  convenience registrations for the common paint and opacity properties
+ ClassAttr(classes ...string) string
+  build a class="..." attribute for shapes, text and groups
+ ClassCSS() string
+  the generated stylesheet as plain CSS text
+
+
 ## Building and Usage ##
 
 See svgdef.[svg|png|pdf] for a graphical view of the function calls
@@ -150,6 +167,24 @@ The SVG type:
 	}
 
 Most operations are methods on this type, specifying the destination io.Writer and decimal precision.
+
+### Reusable style classes ###
+
+The floating point package has the same class API as the integer package:
+`StyleClass`, `StyleClassAs`, `FillClass`, `StrokeClass`, `StrokeWidthClass`,
+`OpacityClass`, `FillOpacityClass`, `StrokeOpacityClass`, `ClassAttr` and
+`ClassCSS`. Register a style once, reference it by class from any number of
+shapes, text elements and nested groups, and `End` writes one rule per style:
+
+	dot, _ := canvas.StyleClass("fill:steelblue;fill-opacity:0.8")
+	for i := 0; i < 1000; i++ {
+		canvas.Circle(x, y, 6, svg.ClassAttr(dot))
+	}
+
+A local style on an element wins over its class. Empty, invalid, conflicting
+and post-`End` registrations return `ErrEmptyStyle`, `ErrInvalidStyle`,
+`ErrClassNameConflict` and `ErrDocumentClosed`. Documents with no classes are
+unchanged.
 		
 
 The Offcolor type:

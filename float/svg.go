@@ -35,6 +35,13 @@ import (
 type SVG struct {
 	Writer   io.Writer
 	Decimals int
+
+	classes    map[string]string // normalized declarations -> class name; writes one rule per style
+	classNames map[string]string // class name -> normalized declarations
+	classOrder []string          // class names in registration order, the rule output order
+	classSeq   int               // counter for automatic class names (c1, c2, ...)
+	cssWritten bool              // the stylesheet has been written by End
+	closed     bool              // End has been called and the document is complete
 }
 
 // Offcolor defines the offset and color for gradients
@@ -92,6 +99,7 @@ func (svg *SVG) genattr(ns []string) {
 // Standard Reference: http://www.w3.org/TR/SVG11/struct.html#SVGElement
 func (svg *SVG) Start(w float64, h float64, ns ...string) {
 	d := svg.Decimals
+	svg.beginDoc()
 	svg.printf(svginitfmt, svgtop, d, w, "", d, h, "")
 	svg.genattr(ns)
 }
@@ -100,6 +108,7 @@ func (svg *SVG) Start(w float64, h float64, ns ...string) {
 // Other attributes may be optionally added, for example viewbox or additional namespaces
 func (svg *SVG) Startunit(w float64, h float64, unit string, ns ...string) {
 	d := svg.Decimals
+	svg.beginDoc()
 	svg.printf(svginitfmt, svgtop, d, w, unit, d, h, unit)
 	svg.genattr(ns)
 }
@@ -108,6 +117,7 @@ func (svg *SVG) Startunit(w float64, h float64, unit string, ns ...string) {
 // Other attributes may be optionally added, for example viewbox or additional namespaces
 func (svg *SVG) Startpercent(w float64, h float64, ns ...string) {
 	d := svg.Decimals
+	svg.beginDoc()
 	svg.printf(svginitfmt, svgtop, d, w, "%", d, h, "%")
 	svg.genattr(ns)
 }
@@ -127,12 +137,20 @@ func (svg *SVG) StartviewUnit(w, h float64, unit string, minx, miny, vw, vh floa
 
 // Startraw begins the SVG document, passing arbitrary attributes
 func (svg *SVG) Startraw(ns ...string) {
+	svg.beginDoc()
 	svg.printf(svgtop)
 	svg.genattr(ns)
 }
 
-// End the SVG document
-func (svg *SVG) End() { svg.println("</svg>") }
+// End the SVG document. Registered style classes are written first, as a
+// single <style> element in registration order; documents with no classes
+// are unchanged by class support. After End, class registration returns
+// ErrDocumentClosed and the stylesheet is not written again.
+func (svg *SVG) End() {
+	svg.writeClassStyle()
+	svg.println("</svg>")
+	svg.closed = true
+}
 
 // linkembed defines an element with a specified type,
 // (for example "application/javascript", or "text/css").
@@ -974,11 +992,20 @@ func (svg *SVG) pp(x []float64, y []float64, tag string) {
 }
 
 // endstyle modifies an SVG object, with either a series of name="value" pairs,
-// or a single string containing a style
+// or a single string containing a style. class="..." arguments are merged
+// into one class attribute (duplicates removed, first position kept), so
+// ClassAttr values combine with hand written attributes.
 func endstyle(s []string, endtag string) string {
 	if len(s) > 0 {
+		classes, firstClass := mergeClassArgs(s)
 		nv := ""
 		for i := 0; i < len(s); i++ {
+			if _, isClass := classArgValue(s[i]); isClass {
+				if i == firstClass {
+					nv += classAttribute(classes) + " "
+				}
+				continue
+			}
 			if strings.Index(s[i], "=") > 0 {
 				nv += (s[i]) + " "
 			} else {
@@ -989,6 +1016,56 @@ func endstyle(s []string, endtag string) string {
 	}
 	return endtag
 
+}
+
+// classArgValue reports whether arg is a class="..." argument and returns its
+// value. Only quoted values are recognized; other arguments are left alone.
+func classArgValue(arg string) (string, bool) {
+	t := strings.TrimSpace(arg)
+	if len(t) < 8 || !strings.EqualFold(t[:6], "class=") {
+		return "", false
+	}
+	value := t[6:]
+	if len(value) < 2 {
+		return "", false
+	}
+	q := value[0]
+	if (q != '"' && q != '\'') || value[len(value)-1] != q {
+		return "", false
+	}
+	return value[1 : len(value)-1], true
+}
+
+// classAttribute writes a class attribute from already escaped names. The
+// names come either from ClassAttr or from a hand written class argument,
+// whose value the caller is responsible for escaping, as with all other
+// attributes accepted by endstyle.
+func classAttribute(names []string) string {
+	return `class="` + strings.Join(names, " ") + `"`
+}
+
+// mergeClassArgs collects the class names from s in order, dropping
+// duplicates, and returns them with the index of the first class argument.
+func mergeClassArgs(s []string) ([]string, int) {
+	var names []string
+	seen := make(map[string]bool)
+	first := -1
+	for i, arg := range s {
+		value, ok := classArgValue(arg)
+		if !ok {
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		for _, name := range strings.Fields(value) {
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	return names, first
 }
 
 // tt creates a xml element, tag containing s

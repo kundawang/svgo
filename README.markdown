@@ -35,6 +35,23 @@ Output goes to the specified io.Writer.
 
  desc, defs, g (style, transform, id), marker, mask, pattern, title, (a)ddress, link, script, use
 
+### Reusable style classes ###
+
+ StyleClass(style string) (string, error)
+  register name:value declarations once and return a stable class name; the same
+  normalized style returns the same name and writes one CSS rule.
+ StyleClassAs(name, style string) (string, error)
+  register under an explicit class name (name conflict: ErrClassNameConflict)
+ FillClass(color string), StrokeClass(color string)
+ StrokeWidthClass(width float64)
+ OpacityClass(opacity float64), FillOpacityClass(opacity float64), StrokeOpacityClass(opacity float64)
+  convenience registrations for the common paint and opacity properties
+ ClassAttr(classes ...string) string
+  build a class="..." attribute for shapes, text and groups
+ ClassCSS() string
+  the generated stylesheet as plain CSS text
+
+
 ## Building and Usage ##
 
 See svgdef.[svg|png|pdf] for a graphical view of the function calls
@@ -147,6 +164,7 @@ A video describing how to use the package can be seen on YouTube at <http://www.
 * android:	The Android logo
 * bubtrail: Bubble trails
 * bulletgraph:	Bullet Graphs (via Stephen Few)
+* classdemo: Compare inline styles with reusable style classes
 * colortab: Display SVG named colors with RGB values
 * compx:  Component diagrams
 * flower:	Random "flowers"
@@ -196,6 +214,53 @@ The SVG type:
 	}
 
 Most operations are methods on this type, specifying the destination io.Writer.
+
+### Reusable style classes ###
+
+When many elements share the same paint, register it once instead of repeating
+the style on every element:
+
+	dot, _ := canvas.StyleClass("fill:steelblue;fill-opacity:0.8")
+	label, _ := canvas.FillClass("white")
+	for i := 0; i < 1000; i++ {
+		canvas.Circle(x, y, 6, svg.ClassAttr(dot))
+		canvas.Text(x, y+3, "x", svg.ClassAttr(label))
+	}
+
+`End` writes the rules, one per line, in registration order, inside a single
+`<style type="text/css">` element:
+
+	<style type="text/css">
+	.c1{fill:steelblue;fill-opacity:0.8}
+	.c2{fill:white}
+	</style>
+
+The same normalized style always returns the same class and produces exactly
+one rule. Classes work on shapes, text and groups, including nested groups,
+where children inherit the group's class. A local style on an element wins
+over its class, and a class wins over a presentation attribute, following the
+normal SVG/CSS cascade:
+
+	canvas.Circle(x, y, r, svg.ClassAttr(dot), "fill:red") // fill:red wins
+
+Registry behavior is explicit:
+
+* empty styles (`""`, `";"`) return `ErrEmptyStyle`;
+* malformed values, including braces, `!important`, and CSS comments,
+  return `ErrInvalidStyle`; a failed registration never writes a rule;
+* the same style registered again returns the existing class;
+  `StyleClassAs` with a name already used for a different style returns
+  `ErrClassNameConflict`, and an invalid name returns `ErrInvalidClassName`;
+* registering after `End` returns `ErrDocumentClosed`;
+* a document with no classes has exactly the same output as before, and the
+  stylesheet is never written for it.
+
+UTF-8 text in rules is XML escaped, so values such as `"A&B"` or fonts with
+`<`, `>` and quotes stay well-formed. Rule text is deterministic: registration
+order for rules, declaration order within a rule.
+
+Use `go run ./classdemo -o /tmp/classdemo` to build the same 1000-circle,
+1000-label, 100-group picture with inline styles and with classes.
 
 The Offcolor type:
 

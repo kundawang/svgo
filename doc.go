@@ -102,6 +102,17 @@ The SVG type:
 	
 Most operations are methods on this type, specifying the destination io.Writer.
 
+Reusable style classes:
+
+	dot, _ := canvas.StyleClass("fill:steelblue;fill-opacity:0.8")
+	canvas.Circle(x, y, 6, svg.ClassAttr(dot))
+
+register the declarations once and reference the returned class from any
+number of shapes, text elements and nested groups. End writes one CSS rule per
+normalized style. See StyleClass, StyleClassAs, the FillClass, StrokeClass,
+StrokeWidthClass, OpacityClass, FillOpacityClass and StrokeOpacityClass
+helpers, and ClassAttr.
+
 The Offcolor type:
 
 	type Offcolor struct {
