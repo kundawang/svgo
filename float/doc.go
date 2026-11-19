@@ -31,6 +31,16 @@ Metadata elements
 
  desc, defs, g (style, transform, id), mask, marker, pattern, title, (a)ddress, link, script, style, use
 
+Animation
+
+ Animate, AnimateMotion, AnimateTransform animate scalar attributes, motion and
+ transformations. AnimatePath generates a SMIL animation of the d attribute of
+ a path, morphing between two or more paths whose command topology matches:
+ only absolute M, L, C and Z commands are accepted, and every frame must carry
+ the same commands with the same parameter counts. ParsePath, MorphValues and
+ InterpolatePath expose the same parsing, validation and interpolation without
+ writing markup.
+
 Usage: (assuming GOPATH is set)
 
 	go get github.com/ajstarks/svgo/float
