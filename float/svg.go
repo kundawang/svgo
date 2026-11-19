@@ -35,6 +35,11 @@ import (
 type SVG struct {
 	Writer   io.Writer
 	Decimals int
+	symbols  map[string]symbolDef // defined symbols, by id
+	openSym  []string             // stack of currently open symbol ids
+	symRefs  []symbolRef           // references made by UseSymbol
+	symErrs  []error               // accumulated symbol errors
+	symSeq   int                   // symbol operation counter, for locating errors
 }
 
 // Offcolor defines the offset and color for gradients

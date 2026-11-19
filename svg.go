@@ -33,7 +33,12 @@ import (
 
 // SVG defines the location of the generated SVG
 type SVG struct {
-	Writer io.Writer
+	Writer  io.Writer
+	symbols map[string]symbolDef // defined symbols, by id
+	openSym []string             // stack of currently open symbol ids
+	symRefs []symbolRef           // references made by UseSymbol
+	symErrs []error               // accumulated symbol errors
+	symSeq  int                   // symbol operation counter, for locating errors
 }
 
 // Offcolor defines the offset and color for gradients
@@ -62,7 +67,7 @@ const (
 )
 
 // New is the SVG constructor, specifying the io.Writer where the generated SVG is written.
-func New(w io.Writer) *SVG { return &SVG{w} }
+func New(w io.Writer) *SVG { return &SVG{Writer: w} }
 
 func (svg *SVG) print(a ...interface{}) (n int, errno error) {
 	return fmt.Fprint(svg.Writer, a...)
